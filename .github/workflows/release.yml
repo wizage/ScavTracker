@@ -42,14 +42,11 @@ jobs:
         if: steps.version.outputs.changed == 'true'
         run: |
           version="${{ steps.version.outputs.version }}"
-          staging="ScavTracker"
-          rm -rf "$staging"
-          mkdir "$staging"
-          # Copy runtime files/folders only; exclude dev assets + docs + git.
-          cp plugin.json main.lua "$staging"/
-          cp -r chat data ui "$staging"/
-          # (plugin.png, README.md, .git, .github, .gitignore are omitted.)
-          zip -r "ScavTracker-v$version.zip" "$staging"
+          # Zip runtime files/folders at the archive ROOT (no wrapper folder),
+          # matching the plugin structure (plugin.json + main.lua at top level).
+          # Dev assets + docs + git are excluded.
+          zip -r "ScavTracker-v$version.zip" \
+            plugin.json main.lua chat data ui
 
       - name: Create GitHub Release
         if: steps.version.outputs.changed == 'true'
