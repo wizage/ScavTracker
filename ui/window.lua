@@ -20,6 +20,7 @@ local TABS = {
 }
 
 local Stats
+local Colours         -- data/colours module (rarity text colouring)
 local window
 local root            -- root vertical Panel (resized with the window)
 local resizeHandle    -- bottom-right resize grip
@@ -69,7 +70,7 @@ local bodyHeight, bodyWidth, refreshList, applyGeometry, saveGeometry
 
 -- Build row i (1-based), parented to `body` with body-relative y.
 -- Returns true if the row fit the visible band and was drawn.
-local function buildRow(i, name, count)
+local function buildRow(i, name, count, rarity)
     local y = (i - 1) * S.ROW_H - scrollY
     local bh = bodyHeight()
 
@@ -90,7 +91,9 @@ local function buildRow(i, name, count)
     nameText:SetPos(8, y)
     nameText.content = name
     nameText.font = S.FONT
-    nameText.colour = S.COL_NAME
+    -- Colour the name by rarity if the colour setting is enabled, else white.
+    local rarityCol = Colours and Colours:ForRarity(rarity)
+    nameText.colour = rarityCol or S.COL_NAME
     nameText:AlignTo(ui.AlignMode.TOPLEFT, ui.AlignMode.CENTRE)
 
     -- Count cell: full-width box inset on both sides; right-aligned text puts
@@ -340,7 +343,7 @@ function refreshList()
 
     local rows = Stats:GetSorted(activeTab)
     for i, row in ipairs(rows) do
-        try(buildRow, i, row.name, row.count)
+        try(buildRow, i, row.name, row.count, row.rarity)
     end
 
     try(buildScrollbar, #rows)
@@ -384,8 +387,9 @@ function UI.Toggle()
     if uiVisible then UI.Hide() else UI.Show() end
 end
 
-function UI.Init(statsModule)
+function UI.Init(statsModule, coloursModule)
     Stats = statsModule
+    Colours = coloursModule
 
     local gameWindow = ui.Interfaces:GetComponent(id.Component.TOPLEVEL_V2__PLUGIN_BUILD_LAYER_TOP)
     if gameWindow == nil then
@@ -415,78 +419,63 @@ function UI.Init(statsModule)
     window:SetSize(winW, winH)
     window:SetPos(winX, winY)
 
-    -- Background: tiling content sprite filling the whole window (behind the
-    -- border + content). Created first so everything else renders on top.
+    -- Subtle HUD-window frame (matches the game's native info panels - lighter
+    -- than the ornate modal frame). A 6-piece set: content fill, top/bottom
+    -- tiles, side tiles, and top/bottom corners. Built first so content renders
+    -- on top. BORDER/CORNER are the frame thickness.
+    local BORDER = 4
+    local CORNER = 8
+    local function frameSprite(spriteID, setup, flipH, flipV)
+        local s = ui.Sprite.new(window)
+        s.spriteID = spriteID
+        setup(s)
+        try(function() s.clickthrough = true end)
+        if flipH then try(function() s.isFlippedHorizontally = true end) end
+        if flipV then try(function() s.isFlippedVertical = true end) end
+        return s
+    end
+
+    -- Content fill (interior background), inset by the thin edge (2px) so it
+    -- fills right up to the frame edges with no bare gap.
+    local EDGE_T = 2
     local bg = ui.Sprite.new(window)
-    bg.spriteID = id.Sprite.RS3_MODAL_WINDOW_CONTENT_TILE
-    bg:SetPos(0, 0)
-    bg:SetSize(0, 0, 1.0, 1.0)
+    bg.spriteID = id.Sprite.RS3_HUD_WINDOW_CONTENT_TILE
+    bg:SetPos(EDGE_T, EDGE_T)
+    bg:SetSize(-EDGE_T * 2, -EDGE_T * 2, 1.0, 1.0)
     try(function() bg.isTiling = true end)
     try(function() bg.clickthrough = false end)  -- solid surface: capture input
     try(function() bg.enabled = true end)
 
-    -- Native gold sprite border around the window (same sprites PrettyUI uses).
-    -- Pieces are anchored to the window edges so they resize with it. Created
-    -- first so content/handles render on top.
-    local BORDER = 8      -- side/bottom thickness
-    local CORNER = 16     -- bottom corner size
-    local SIDE_SPR   = id.Sprite.RS3_MODAL_WINDOW_1_SIDE_TILE
-    local BOTTOM_SPR = id.Sprite.RS3_MODAL_WINDOW_1_BOTTOM_TILE
-    local CORNER_SPR = id.Sprite.RS3_MODAL_WINDOW_1_BOTTOM_CORNER
-    local function borderSprite(spriteID, setup)
-        local s = ui.Sprite.new(window)
-        s.spriteID = spriteID
-        setup(s)
-        try(function() s.isTiling = true end)
-        try(function() s.clickthrough = true end)  -- decorative; don't block input
-        return s
-    end
-    -- Left + right side tiles (right is the left sprite flipped).
-    borderSprite(SIDE_SPR, function(s)
-        s:SetPos(0, CORNER); s:SetSize(BORDER, -CORNER - CORNER, 0, 1.0)
-    end)
-    borderSprite(SIDE_SPR, function(s)
-        s:SetPos(-BORDER, CORNER, 1.0); s:SetSize(BORDER, -CORNER - CORNER, 0, 1.0)
-        try(function() s.isFlippedHorizontally = true end)
-    end)
-    -- Bottom tile between the corners.
-    borderSprite(BOTTOM_SPR, function(s)
-        s:SetPos(CORNER, -BORDER, 0, 1.0); s:SetSize(-CORNER * 2, BORDER, 1.0, 0)
-    end)
-    -- Bottom-left + bottom-right corners (right is flipped).
-    borderSprite(CORNER_SPR, function(s)
-        s:SetPos(0, -CORNER, 0, 1.0); s:SetSize(CORNER, CORNER, 0, 0)
-        try(function() s.isTiling = false end)
-    end)
-    borderSprite(CORNER_SPR, function(s)
-        s:SetPos(-CORNER, -CORNER, 1.0, 1.0); s:SetSize(CORNER, CORNER, 0, 0)
-        try(function() s.isTiling = false end)
-        try(function() s.isFlippedHorizontally = true end)
-    end)
+    local TOP  = id.Sprite.RS3_HUD_WINDOW_TOP_TILE
+    local BOT  = id.Sprite.RS3_HUD_WINDOW_BOTTOM_TILE
+    local SIDE = id.Sprite.RS3_HUD_WINDOW_SIDE_TILE
+    local CT   = id.Sprite.RS3_HUD_WINDOW_CORNER_TOP
+    local CB   = id.Sprite.RS3_HUD_WINDOW_CORNER_BOTTOM
 
-    -- Top titlebar: gold frame across the top strip. Left corner + tiling
-    -- centre + right corner (PrettyUI's titlebar sprites).
-    local TL_SPR = id.Sprite.RS3_MODAL_WINDOW_1_TITLE_CORNER   -- left corner
-    local TC_SPR = id.Sprite.RS3_MODAL_WINDOW_1_TITLE_TILE     -- centre tile
-    local TR_SPR = id.Sprite.RS3_MODAL_WINDOW_1_CLOSE_CORNER   -- right corner
-    local T_LW, T_RW = 28, 64   -- left / right corner widths (PrettyUI values)
-    borderSprite(TL_SPR, function(s)
-        s:SetPos(0, 0); s:SetSize(T_LW, S.TITLE_H, 0, 0); try(function() s.isTiling = false end)
-    end)
-    borderSprite(TC_SPR, function(s)
-        s:SetPos(T_LW, 0); s:SetSize(-(T_LW + T_RW), S.TITLE_H, 1.0, 0)
-    end)
-    borderSprite(TR_SPR, function(s)
-        s:SetPos(-T_RW, 0, 1.0); s:SetSize(T_RW, S.TITLE_H, 0, 0); try(function() s.isTiling = false end)
-    end)
+    -- Top + bottom edge tiles. The HUD edge sprite is a thin line (~2px); force
+    -- it to CORNER height stretches/repeats it and causes an artifact, so draw
+    -- it at its thin natural height flush against the top/bottom.
+    local EDGE_T = 2
+    frameSprite(TOP, function(s) s:SetPos(CORNER, 0); s:SetSize(-CORNER * 2, EDGE_T, 1.0, 0); try(function() s.isTiling = true end) end)
+    frameSprite(BOT, function(s) s:SetPos(CORNER, -EDGE_T, 0, 1.0); s:SetSize(-CORNER * 2, EDGE_T, 1.0, 0); try(function() s.isTiling = true end) end)
+    -- Left + right side tiles (also thin).
+    frameSprite(SIDE, function(s) s:SetPos(0, CORNER); s:SetSize(EDGE_T, -CORNER * 2, 0, 1.0); try(function() s.isTiling = true end) end)
+    frameSprite(SIDE, function(s) s:SetPos(-EDGE_T, CORNER, 1.0); s:SetSize(EDGE_T, -CORNER * 2, 0, 1.0); try(function() s.isTiling = true end) end, true)
+    -- Corners: cornerTop/cornerBottom are pre-oriented for their edge, so only
+    -- the right-hand ones need a horizontal flip (no vertical flip needed).
+    frameSprite(CT, function(s) s:SetPos(0, 0); s:SetSize(CORNER, CORNER, 0, 0) end)
+    frameSprite(CT, function(s) s:SetPos(-CORNER, 0, 1.0); s:SetSize(CORNER, CORNER, 0, 0) end, true)
+    frameSprite(CB, function(s) s:SetPos(0, -CORNER, 0, 1.0); s:SetSize(CORNER, CORNER, 0, 0) end)
+    frameSprite(CB, function(s) s:SetPos(-CORNER, -CORNER, 1.0, 1.0); s:SetSize(CORNER, CORNER, 0, 0) end, true)
+
 
     -- Global per-tick driver for drag/resize (keeps window pinned to cursor).
     Event.Logic.Subscribe("scavTrackerGrab", grabTick)
 
-    -- Title label inside the window's top strip.
+    -- Title label centred within the titlebar strip.
     local titleText = ui.Text.new(window)
-    titleText:SetSize(0, 20, 1.0, 0)
-    titleText:SetPos(0, 10)
+    titleText:SetSize(0, S.TITLE_H, 1.0, 0)
+    titleText:SetPos(0, 0)
     titleText.content = "Scav Tracker"
     titleText.font = S.FONT
     titleText:AlignTo(ui.AlignMode.CENTRE)
@@ -512,8 +501,8 @@ function UI.Init(statsModule)
     local CLOSE_OVR = id.Sprite.RS3_BTN_MODAL_WINDOW_1_CLOSE_OVR
     local closeBtn = ui.Sprite.new(window)
     closeBtn:SetSize(20, 20, 0, 0)
-    closeBtn:SetX(-24, 1.0)
-    closeBtn:SetY(6)
+    closeBtn:SetX(-28, 1.0)   -- 8px from the right edge (20 wide + 8)
+    closeBtn:SetY(9)          -- vertically centred in the TITLE_H strip
     closeBtn.spriteID = CLOSE_NML
     try(function() closeBtn.clickthrough = false end)
     try(function() closeBtn.enabled = true end)

@@ -9,6 +9,7 @@
 -- ID is available -> start the chat reader feeding procs into the data layer.
 
 local Stats    = require("data/stats")
+local Colours  = require("data/colours")
 local Reader   = require("chat/reader")
 local UI       = require("ui/window")
 local Settings = require("ui/settings")
@@ -24,9 +25,12 @@ if not hasTrackingAccess then
     print("[ScavTracker] WARNING: trackingAccess not granted - using shared data bucket")
 end
 
+-- Load global colour settings (not per-account).
+Colours:Load()
+
 -- Build the window (empty until data loads) and wire the settings layer.
-UI.Init(Stats)
-Settings.Init(Stats, function() UI.Refresh() end, UI)
+UI.Init(Stats, Colours)
+Settings.Init(Stats, function() UI.Refresh() end, UI, Colours)
 
 -- Record a proc into the data layer and refresh the window.
 local function recordProc(name, count)

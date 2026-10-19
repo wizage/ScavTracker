@@ -29,29 +29,34 @@ local function stripTags(s)
     return (string.gsub(s, "<[^>]->", ""))
 end
 
--- Parse a component-gain message into (count, name). Both supported formats
--- share a "N x <item>" tail; we capture it and drop the trailing
+-- Parse a component-gain message into (count, name, colour). Both supported
+-- formats share a "N x <item>" tail; we capture it and drop the trailing
 -- "component"/"components" word so "Enhancing components" -> "Enhancing".
+-- `colour` is the hex from the message's <col=XXXXXX> tag (the game's own
+-- text colour for this proc), or nil if the message had no colour tag.
 -- Returns nil if the message doesn't match.
 local function parseComponentProc(message)
+    -- Capture the colour tag (if any) before stripping tags.
+    local colour = string.match(message, "<col=(%x+)>")
+
     local clean = stripTags(message)
     local count, item = string.match(clean, "(%d+)%s*x%s*(.-)%.?%s*$")
     if not (count and item and item ~= "") then return nil end
     item = string.gsub(item, "%s*[Cc]omponents?$", "")
     if item == "" then return nil end
-    return tonumber(count), item
+    return tonumber(count), item, colour
 end
 
--- Start listening. `onProc(name, count)` is called for each detected proc.
+-- Start listening. `onProc(name, count, colour)` is called for each proc.
 function Reader.Start(onProc)
     Event.ChatMessage.Subscribe("scavTrackerChat", function(e)
         local message = e.chatMessage
         if message == nil or message == "" or not isComponentProc(message) then
             return
         end
-        local count, item = parseComponentProc(message)
+        local count, item, colour = parseComponentProc(message)
         if count and item and onProc then
-            onProc(item, count)
+            onProc(item, count, colour)
         end
     end)
 end

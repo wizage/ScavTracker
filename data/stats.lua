@@ -63,7 +63,9 @@ end
 -- Load all counters + settings for the current account prefix.
 function Stats:Load()
     self.allTime       = loadTable(KEY_ALLTIME)
-    self.session       = loadTable(KEY_SESSION)
+    -- Session is per client-launch: it is NOT persisted, so it starts empty
+    -- every time the plugin loads (i.e. each client launch / reload).
+    self.session       = {}
     self.manualSession = loadTable(KEY_MANUAL_SESSION)
     self.order         = loadTable(KEY_ORDER)
 
@@ -113,15 +115,14 @@ function Stats:Add(component, amount)
 
     saveTable(KEY_ORDER, self.order)
     saveTable(KEY_ALLTIME, self.allTime)
-    saveTable(KEY_SESSION, self.session)
+    -- Session is in-memory only (resets each launch), so it is not saved.
     saveTable(KEY_MANUAL_SESSION, self.manualSession)
 
     return self.allTime[component], self.session[component], self.manualSession[component]
 end
 
 function Stats:ResetSession()
-    self.session = {}
-    saveTable(KEY_SESSION, self.session)
+    self.session = {}   -- in-memory only; session is never persisted
 end
 
 function Stats:ResetManualSession()

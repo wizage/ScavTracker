@@ -12,6 +12,7 @@ local S = require("ui/styles")
 
 local Stats        -- data module, injected via Settings.Init
 local UIRef        -- UI module, for the show/hide toggle
+local Colours      -- data/colours module, for the rarity colour controls
 local onChangeCb   -- called after the sort mode changes (to refresh the window)
 
 -- Sort options in display order: { value = Stats.SORT_*, label }.
@@ -83,14 +84,68 @@ local function build(parent)
             syncLabel()
         end)
     end
+
+    -- ---- Rarity text colours ----
+    if Colours ~= nil then
+        -- Enable toggle.
+        local colourToggle = ui.Button.new(parent)
+        colourToggle.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
+        colourToggle:SetSize(0, 28, 1.0, 0)
+        colourToggle:SetPos(8, 120)
+        try(function() colourToggle.canToggle = true end)
+        try(function() colourToggle.isToggled = Colours:IsEnabled() end)
+        local function syncColourLabel()
+            colourToggle.label = Colours:IsEnabled()
+                and "Rarity colours: ON" or "Rarity colours: OFF"
+        end
+        syncColourLabel()
+        colourToggle:Subscribe(ui.Hook.ONBUTTONPRESSED, function()
+            Colours:SetEnabled(not Colours:IsEnabled())
+            syncColourLabel()
+            if onChangeCb then onChangeCb() end
+        end)
+
+        -- Helper: a labelled hex input that commits on content change.
+        local function hexField(labelText, y, getHex, setHex)
+            local lbl = ui.Text.new(parent)
+            lbl:SetSize(90, 28, 0, 0)
+            lbl:SetPos(8, y)
+            lbl.content = labelText
+            lbl.font = S.FONT
+            lbl:AlignTo(ui.AlignMode.TOPLEFT, ui.AlignMode.CENTRE)
+
+            local field = ui.InputField.new(parent)
+            field.stylesheetID = id.StyleSheet.DEFAULT
+            field:SetSize(-106, 28, 1.0, 0)
+            field:SetPos(98, y)
+            try(function()
+                field:Setup(ui.TextContentVisibilityMode.VISIBLE,
+                    ui.InputFieldFilterMode.ALPHANUMERIC, 6)
+            end)
+            field.content = getHex()
+            field:Subscribe(ui.Hook.ONCONTENTCHANGED, function(c, cause, newContent)
+                local text = newContent or c.content
+                setHex(text)              -- validates internally; ignores bad hex
+                if onChangeCb then onChangeCb() end
+            end)
+        end
+
+        hexField("Rare hex",     152,
+            function() return Colours:GetRareHex() end,
+            function(h) Colours:SetRare(h) end)
+        hexField("Uncommon hex", 184,
+            function() return Colours:GetUncommonHex() end,
+            function(h) Colours:SetUncommon(h) end)
+    end
 end
 
 -- Wire up the SettingsLayerReady event. `refreshCb` re-renders the window on
 -- sort change; `uiModule` provides the show/hide toggle.
-function Settings.Init(statsModule, refreshCb, uiModule)
+function Settings.Init(statsModule, refreshCb, uiModule, coloursModule)
     Stats = statsModule
     onChangeCb = refreshCb
     UIRef = uiModule
+    Colours = coloursModule
 
     Event.SettingsLayerReady.Subscribe("scavTrackerSettings", function(e)
         local root = e.component
