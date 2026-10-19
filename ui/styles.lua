@@ -33,6 +33,7 @@ Styles.COL_COUNT    = Vector4.new(1.0, 0.78, 0.30, 1.0)   -- count (gold)
 Styles.COL_SB_TRACK = Vector4.new(0.10, 0.09, 0.08, 1.0)  -- scrollbar track
 Styles.COL_SB_THUMB = Vector4.new(0.45, 0.40, 0.32, 1.0)  -- scrollbar thumb
 Styles.COL_HANDLE   = Vector4.new(0.45, 0.40, 0.32, 0.9)  -- resize grip
+Styles.COL_CLOSE    = Vector4.new(0.86, 0.20, 0.18, 1.0)  -- red close (X)
 Styles.COL_TRANSPARENT = Vector4.new(0.0, 0.0, 0.0, 0.0)  -- invisible capture surfaces
 
 return Styles

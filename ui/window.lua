@@ -112,10 +112,9 @@ function applyGeometry()
     if window == nil then return end
     try(function() window:SetSize(winW, winH) end)
     try(function() window:SetPos(winX, winY) end)
-    try(function() window:SetHeaderLayout(0, 0, 0, 0, ui.GroupBoxHeaderAlignMode.CENTRE) end)
     if root ~= nil then
-        try(function() root:SetSize(-16, -(S.TITLE_H + 12), 1.0, 1.0) end)
-        try(function() root:SetPos(8, S.TITLE_H) end)
+        try(function() root:SetSize(-24, -(S.TITLE_H + 16), 1.0, 1.0) end)
+        try(function() root:SetPos(12, S.TITLE_H) end)
     end
     if resizeHandle ~= nil then
         try(function() resizeHandle:SetX(-S.HANDLE_SZ, 1.0) end)
@@ -127,7 +126,7 @@ end
 -- Persist window geometry so it survives reloads.
 function saveGeometry()
     pcall(function()
-        PersistentDB:SetStructuredData(uiKey("winGeom"),
+        PersistentDB:SetStructuredData("scav_winGeom",
             { x = winX, y = winY, w = winW, h = winH })
     end)
 end
@@ -138,24 +137,31 @@ end
 -- global Event.Logic tick does the actual movement from the live Mouse
 -- position - keeping the window pinned to the cursor even when it outruns the
 -- handle. The grab ends when the heartbeat goes stale (button released).
-local grabKind       = nil     -- "move" | "resize" | nil
+local grabKind       = nil     -- "move" | "resize" | "scroll" | nil
 local grabEdges      = ""      -- for resize: which edges (l/r/t/b) are dragged
 local grabBaseX, grabBaseY     = 0, 0   -- window position at grab start
 local grabBaseW, grabBaseH     = 0, 0   -- window size at grab start
 local grabStartMX, grabStartMY = 0, 0   -- mouse pos at grab start
+local grabBaseScroll = 0       -- scrollY at scroll-grab start
+local grabScrollScale = 1      -- maps thumb pixel travel -> scrollY units
+local grabScrollMax  = 0       -- max scrollY at scroll-grab start
 local grabLastTick   = 0
 local grabCurTick    = 0
 
--- Begin (or refresh) a grab. kind = "move" | "resize". For resize, `edges` is
--- a string containing any of l/r/t/b naming which edges follow the cursor
--- (e.g. "rb" = bottom-right corner, "l" = left edge).
-function UI._beginGrab(kind, edges)
+-- Begin (or refresh) a grab. kind = "move" | "resize" | "scroll".
+-- resize: `edges` names which edges follow the cursor (l/r/t/b).
+-- scroll: `scale` maps one pixel of thumb travel to scrollY units, and
+--         `smax` is the max scrollY (clamp).
+function UI._beginGrab(kind, edges, scale, smax)
     grabLastTick = grabCurTick
     if grabKind == kind and grabEdges == (edges or "") then return end
     grabKind = kind
     grabEdges = edges or ""
     grabBaseX, grabBaseY = winX, winY
     grabBaseW, grabBaseH = winW, winH
+    grabBaseScroll = scrollY
+    grabScrollScale = scale or 1
+    grabScrollMax = smax or 0
     grabStartMX, grabStartMY = Mouse.GetX(), Mouse.GetY()
 end
 
@@ -178,6 +184,15 @@ local function grabTick(e)
         winX = grabBaseX + dx
         winY = grabBaseY + dy
         try(function() window:SetPos(winX, winY) end)
+        return
+    end
+
+    if grabKind == "scroll" then
+        -- Thumb drag: mouse Y delta * scale = scrollY delta, clamped.
+        local ns = grabBaseScroll + dy * grabScrollScale
+        if ns < 0 then ns = 0 elseif ns > grabScrollMax then ns = grabScrollMax end
+        scrollY = ns
+        refreshList()
         return
     end
 
@@ -293,6 +308,16 @@ local function buildScrollbar(numRows)
     thumb:SetPos(trackX, thumbY)
     thumb.fill = true
     thumb.colour = S.COL_SB_THUMB
+
+    -- Grabbable thumb: dragging it scrolls. scale maps 1px of thumb travel to
+    -- scrollY units (maxScroll / track travel); smax clamps to maxScroll.
+    local scale = (travel > 0) and (maxY / travel) or 0
+    try(function() thumb.clickthrough = false end)
+    try(function() thumb.enabled = true end)
+    thumb:Subscribe(ui.Hook.ONHOLD, function()
+        if not Mouse.IsAvailable() then return end
+        UI._beginGrab("scroll", nil, scale, maxY)
+    end)
 end
 
 -- Rebuild the table for the active tab.
@@ -346,13 +371,13 @@ function UI.IsVisible() return uiVisible end
 function UI.Show()
     uiVisible = true
     applyVisibility()
-    pcall(function() PersistentDB:SetBool(uiKey("uiVisible"), true) end)
+    pcall(function() PersistentDB:SetBool("scav_uiVisible", true) end)
 end
 
 function UI.Hide()
     uiVisible = false
     applyVisibility()
-    pcall(function() PersistentDB:SetBool(uiKey("uiVisible"), false) end)
+    pcall(function() PersistentDB:SetBool("scav_uiVisible", false) end)
 end
 
 function UI.Toggle()
@@ -368,14 +393,19 @@ function UI.Init(statsModule)
         return
     end
 
-    -- Root window: GroupBox for its native panel background (header unused).
-    window = ui.GroupBox.new(gameWindow)
-    window.stylesheetID = id.StyleSheet.DEFAULT
+    -- Root window: a plain Layer (no built-in frame) so our gold sprite border
+    -- is the only frame and coincides exactly with the window rect. A
+    -- background tile sprite fills the interior (PrettyUI's structure). Using a
+    -- GroupBox here caused a mismatched inner frame + click-through dead zones.
+    window = ui.Layer.new(gameWindow)
     try(function() window.clickthrough = false end)  -- block pass-through to game
     try(function() window.enabled = true end)
 
     -- Load persisted geometry (falls back to defaults) and apply it.
-    local gx = PersistentDB and PersistentDB:GetStructuredData(uiKey("winGeom"))
+    -- Uses a fixed key (not the per-account prefix): window position/size is a
+    -- UI preference, and the prefix isn't set yet at Init time anyway, so a
+    -- prefixed key would never match on load -> the window would jump.
+    local gx = PersistentDB and PersistentDB:GetStructuredData("scav_winGeom")
     if type(gx) == "table" then
         winX = tonumber(gx.x) or winX
         winY = tonumber(gx.y) or winY
@@ -385,9 +415,70 @@ function UI.Init(statsModule)
     window:SetSize(winW, winH)
     window:SetPos(winX, winY)
 
-    -- Collapse the GroupBox header (we draw our own title below instead).
-    try(function() window.headerText.content = "" end)
-    try(function() window:SetHeaderLayout(0, 0, 0, 0, ui.GroupBoxHeaderAlignMode.CENTRE) end)
+    -- Background: tiling content sprite filling the whole window (behind the
+    -- border + content). Created first so everything else renders on top.
+    local bg = ui.Sprite.new(window)
+    bg.spriteID = id.Sprite.RS3_MODAL_WINDOW_CONTENT_TILE
+    bg:SetPos(0, 0)
+    bg:SetSize(0, 0, 1.0, 1.0)
+    try(function() bg.isTiling = true end)
+    try(function() bg.clickthrough = false end)  -- solid surface: capture input
+    try(function() bg.enabled = true end)
+
+    -- Native gold sprite border around the window (same sprites PrettyUI uses).
+    -- Pieces are anchored to the window edges so they resize with it. Created
+    -- first so content/handles render on top.
+    local BORDER = 8      -- side/bottom thickness
+    local CORNER = 16     -- bottom corner size
+    local SIDE_SPR   = id.Sprite.RS3_MODAL_WINDOW_1_SIDE_TILE
+    local BOTTOM_SPR = id.Sprite.RS3_MODAL_WINDOW_1_BOTTOM_TILE
+    local CORNER_SPR = id.Sprite.RS3_MODAL_WINDOW_1_BOTTOM_CORNER
+    local function borderSprite(spriteID, setup)
+        local s = ui.Sprite.new(window)
+        s.spriteID = spriteID
+        setup(s)
+        try(function() s.isTiling = true end)
+        try(function() s.clickthrough = true end)  -- decorative; don't block input
+        return s
+    end
+    -- Left + right side tiles (right is the left sprite flipped).
+    borderSprite(SIDE_SPR, function(s)
+        s:SetPos(0, CORNER); s:SetSize(BORDER, -CORNER - CORNER, 0, 1.0)
+    end)
+    borderSprite(SIDE_SPR, function(s)
+        s:SetPos(-BORDER, CORNER, 1.0); s:SetSize(BORDER, -CORNER - CORNER, 0, 1.0)
+        try(function() s.isFlippedHorizontally = true end)
+    end)
+    -- Bottom tile between the corners.
+    borderSprite(BOTTOM_SPR, function(s)
+        s:SetPos(CORNER, -BORDER, 0, 1.0); s:SetSize(-CORNER * 2, BORDER, 1.0, 0)
+    end)
+    -- Bottom-left + bottom-right corners (right is flipped).
+    borderSprite(CORNER_SPR, function(s)
+        s:SetPos(0, -CORNER, 0, 1.0); s:SetSize(CORNER, CORNER, 0, 0)
+        try(function() s.isTiling = false end)
+    end)
+    borderSprite(CORNER_SPR, function(s)
+        s:SetPos(-CORNER, -CORNER, 1.0, 1.0); s:SetSize(CORNER, CORNER, 0, 0)
+        try(function() s.isTiling = false end)
+        try(function() s.isFlippedHorizontally = true end)
+    end)
+
+    -- Top titlebar: gold frame across the top strip. Left corner + tiling
+    -- centre + right corner (PrettyUI's titlebar sprites).
+    local TL_SPR = id.Sprite.RS3_MODAL_WINDOW_1_TITLE_CORNER   -- left corner
+    local TC_SPR = id.Sprite.RS3_MODAL_WINDOW_1_TITLE_TILE     -- centre tile
+    local TR_SPR = id.Sprite.RS3_MODAL_WINDOW_1_CLOSE_CORNER   -- right corner
+    local T_LW, T_RW = 28, 64   -- left / right corner widths (PrettyUI values)
+    borderSprite(TL_SPR, function(s)
+        s:SetPos(0, 0); s:SetSize(T_LW, S.TITLE_H, 0, 0); try(function() s.isTiling = false end)
+    end)
+    borderSprite(TC_SPR, function(s)
+        s:SetPos(T_LW, 0); s:SetSize(-(T_LW + T_RW), S.TITLE_H, 1.0, 0)
+    end)
+    borderSprite(TR_SPR, function(s)
+        s:SetPos(-T_RW, 0, 1.0); s:SetSize(T_RW, S.TITLE_H, 0, 0); try(function() s.isTiling = false end)
+    end)
 
     -- Global per-tick driver for drag/resize (keeps window pinned to cursor).
     Event.Logic.Subscribe("scavTrackerGrab", grabTick)
@@ -413,23 +504,29 @@ function UI.Init(statsModule)
         UI._beginGrab("move")
     end)
 
-    -- Close (X) button, top-right. Hides the window (tracking continues).
-    local closeBtn = ui.Button.new(window)
+    -- Close (X) button, top-right: the native RS modal-window close sprite
+    -- (red stone button with gold X), ids sourced from PrettyUI's sprite map.
+    -- Hides the window (tracking continues). Swaps to the hover sprite on
+    -- mouseover for polish.
+    local CLOSE_NML = id.Sprite.RS3_BTN_MODAL_WINDOW_1_CLOSE_NML
+    local CLOSE_OVR = id.Sprite.RS3_BTN_MODAL_WINDOW_1_CLOSE_OVR
+    local closeBtn = ui.Sprite.new(window)
     closeBtn:SetSize(20, 20, 0, 0)
     closeBtn:SetX(-24, 1.0)
     closeBtn:SetY(6)
-    closeBtn.label = "X"
-    closeBtn.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
+    closeBtn.spriteID = CLOSE_NML
     try(function() closeBtn.clickthrough = false end)
     try(function() closeBtn.enabled = true end)
-    closeBtn:Subscribe(ui.Hook.ONBUTTONPRESSED, function() UI.Hide() end)
+    closeBtn:Subscribe(ui.Hook.ONMOUSEOVER, function() closeBtn.spriteID = CLOSE_OVR end)
+    closeBtn:Subscribe(ui.Hook.ONMOUSELEAVE, function() closeBtn.spriteID = CLOSE_NML end)
+    closeBtn:Subscribe(ui.Hook.ONCLICK, function() UI.Hide() end)
 
     -- Root vertical panel below the title: [tab bar] / [table] / [button bar].
     root = ui.Panel.new(window)
     root.isVertical = true
     root.spacing = 6
-    root:SetSize(-16, -(S.TITLE_H + 12), 1.0, 1.0)
-    root:SetPos(8, S.TITLE_H)
+    root:SetSize(-24, -(S.TITLE_H + 16), 1.0, 1.0)
+    root:SetPos(12, S.TITLE_H)
 
     -- Region 1: tab bar - equal-width toggle buttons.
     local tabBar = ui.Panel.new(root)
@@ -489,28 +586,39 @@ function UI.Init(statsModule)
 
     -- Edges (full-length strips inset from the corners).
     makeHandle("l", function(h) h:SetSize(EDGE, -2 * EDGE, 0, 1.0); h:SetPos(0, EDGE) end)
-    makeHandle("r", function(h) h:SetSize(EDGE, -2 * EDGE, 0, 1.0); h:SetX(-EDGE, 1.0); h:SetY(EDGE) end)
     makeHandle("t", function(h) h:SetSize(-2 * EDGE, EDGE, 1.0, 0); h:SetPos(EDGE, 0) end)
     makeHandle("b", function(h) h:SetSize(-2 * EDGE, EDGE, 1.0, 0); h:SetX(EDGE); h:SetY(-EDGE, 1.0) end)
+
+    -- Right edge is SPLIT into a top segment (over the title/tab area) and a
+    -- bottom segment (over the button bar), leaving the middle band - where
+    -- the scrollbar lives - free, so dragging the scrollbar never triggers a
+    -- resize. SB_TOP/SB_BOT mark the scrollbar's vertical span in window units.
+    local SB_TOP = S.TITLE_H + S.TAB_H + 10   -- where the table body starts
+    local SB_BOT = S.BUTTON_H + EDGE + 6       -- space reserved at the bottom
+    makeHandle("r", function(h)  -- above the scrollbar
+        h:SetSize(EDGE, SB_TOP - EDGE, 0, 0); h:SetX(-EDGE, 1.0); h:SetY(EDGE)
+    end)
+    makeHandle("r", function(h)  -- below the scrollbar
+        h:SetSize(EDGE, SB_BOT, 0, 0); h:SetX(-EDGE, 1.0); h:SetY(-EDGE - SB_BOT, 1.0)
+    end)
 
     -- Corners (square grips).
     makeHandle("lt", function(h) h:SetSize(EDGE, EDGE, 0, 0); h:SetPos(0, 0) end)
     makeHandle("rt", function(h) h:SetSize(EDGE, EDGE, 0, 0); h:SetX(-EDGE, 1.0); h:SetY(0) end)
     makeHandle("lb", function(h) h:SetSize(EDGE, EDGE, 0, 0); h:SetX(0); h:SetY(-EDGE, 1.0) end)
 
-    -- Bottom-right corner: a visible grip (the others are invisible strips).
+    -- Bottom-right corner resize handle (invisible, like the other edges).
     resizeHandle = makeHandle("rb", function(h)
         h:SetSize(S.HANDLE_SZ, S.HANDLE_SZ, 0, 0)
         h:SetX(-S.HANDLE_SZ, 1.0)
         h:SetY(-S.HANDLE_SZ, 1.0)
     end)
-    resizeHandle.colour = S.COL_HANDLE  -- make the corner grip visible
 
     selectTab(activeTab)
 
     -- Restore persisted visibility (defaults to shown).
     local vis
-    local okVis = pcall(function() vis = PersistentDB:GetBool(uiKey("uiVisible")) end)
+    local okVis = pcall(function() vis = PersistentDB:GetBool("scav_uiVisible") end)
     if okVis and vis == false then uiVisible = false end
     applyVisibility()
 end
