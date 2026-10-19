@@ -106,9 +106,11 @@ local function build(parent)
         end)
 
         -- Helper: a labelled hex input that commits on content change.
+        local LBL_W = 120   -- generous label column so text never clips
+        local FLD_X = LBL_W + 12
         local function hexField(labelText, y, getHex, setHex)
             local lbl = ui.Text.new(parent)
-            lbl:SetSize(90, 28, 0, 0)
+            lbl:SetSize(LBL_W, 28, 0, 0)
             lbl:SetPos(8, y)
             lbl.content = labelText
             lbl.font = S.FONT
@@ -116,8 +118,8 @@ local function build(parent)
 
             local field = ui.InputField.new(parent)
             field.stylesheetID = id.StyleSheet.DEFAULT
-            field:SetSize(-106, 28, 1.0, 0)
-            field:SetPos(98, y)
+            field:SetSize(-(FLD_X + 8), 28, 1.0, 0)
+            field:SetPos(FLD_X, y)
             try(function()
                 field:Setup(ui.TextContentVisibilityMode.VISIBLE,
                     ui.InputFieldFilterMode.ALPHANUMERIC, 6)
@@ -130,10 +132,10 @@ local function build(parent)
             end)
         end
 
-        hexField("Rare hex",     152,
+        hexField("Rare",     152,
             function() return Colours:GetRareHex() end,
             function(h) Colours:SetRare(h) end)
-        hexField("Uncommon hex", 184,
+        hexField("Uncommon", 184,
             function() return Colours:GetUncommonHex() end,
             function(h) Colours:SetUncommon(h) end)
     end

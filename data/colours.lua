@@ -18,7 +18,7 @@ local KEY_UNCOMMON  = "scav_colourUncommon"
 local DEFAULT_RARE     = "ff0000"
 local DEFAULT_UNCOMMON = "ffa500"
 
-Colours.enabled      = false
+Colours.enabled      = true
 Colours.rareHex      = DEFAULT_RARE
 Colours.uncommonHex  = DEFAULT_UNCOMMON
 
@@ -44,8 +44,16 @@ function Colours.HexToVector4(hex)
 end
 
 function Colours:Load()
-    local okE, en = pcall(function() return PersistentDB:GetBool(KEY_ENABLED) end)
-    self.enabled = (okE and en == true)
+    -- Default ON: if the user has never set the flag, enable colours. If a
+    -- value exists, respect it (including an explicit OFF).
+    local exists = false
+    pcall(function() exists = PersistentDB:CheckExists(KEY_ENABLED) end)
+    if exists then
+        local okE, en = pcall(function() return PersistentDB:GetBool(KEY_ENABLED) end)
+        self.enabled = (okE and en == true)
+    else
+        self.enabled = true
+    end
 
     local okR, r = pcall(function() return PersistentDB:GetString(KEY_RARE) end)
     self.rareHex = (okR and normHex(r)) or DEFAULT_RARE
