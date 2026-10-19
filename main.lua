@@ -72,3 +72,11 @@ end
 
 -- Start watching chat for component-gain procs.
 Reader.Start(recordProc)
+
+-- Clean up on unload/reload so event subscriptions don't leak across reloads.
+function PluginShutdown()
+    pcall(function() Reader.Stop() end)
+    pcall(function() Event.Logic.Unsubscribe("scavTrackerTrackingPoll") end)
+    pcall(function() Event.Logic.Unsubscribe("scavTrackerGrab") end)
+    pcall(function() Event.SettingsLayerReady.Unsubscribe("scavTrackerSettings") end)
+end

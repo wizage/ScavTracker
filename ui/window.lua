@@ -6,7 +6,7 @@
 -- dropdown, so rows are hand-drawn Rectangles + Text).
 --
 -- Style constants (sizes, colours, font) live in ui/styles, referenced as S.*.
--- Public API: UI.Init(stats), UI.Refresh(), UI.Show/Hide/Toggle/IsVisible().
+-- Public API: UI.Init(stats, colours), UI.Refresh(), UI.Show/Hide/Toggle/IsVisible().
 -- Tab keys match Stats:GetCounter: "session" | "trip" | "allTime".
 
 local UI = {}
@@ -44,17 +44,6 @@ local function try(fn, ...)
         print("[ScavTracker] UI warn: " .. tostring(err))
     end
     return ok
-end
-
--- Namespace a UI persistence key with the per-account prefix from Stats, so
--- window geometry/visibility are per-account like the counters.
-local function uiKey(base)
-    local prefix = "scav_anon_"
-    if Stats and Stats.KeyPrefix then
-        local ok, p = pcall(function() return Stats:KeyPrefix() end)
-        if ok and p then prefix = p end
-    end
-    return prefix .. base
 end
 
 -- Remove all existing row components from the table body.
@@ -397,7 +386,7 @@ function UI.Init(statsModule, coloursModule)
         return
     end
 
-    -- Root window: a plain Layer (no built-in frame) so our gold sprite border
+    -- Root window: a plain Layer (no built-in frame) so our HUD sprite frame
     -- is the only frame and coincides exactly with the window rect. A
     -- background tile sprite fills the interior (PrettyUI's structure). Using a
     -- GroupBox here caused a mismatched inner frame + click-through dead zones.
@@ -422,8 +411,7 @@ function UI.Init(statsModule, coloursModule)
     -- Subtle HUD-window frame (matches the game's native info panels - lighter
     -- than the ornate modal frame). A 6-piece set: content fill, top/bottom
     -- tiles, side tiles, and top/bottom corners. Built first so content renders
-    -- on top. BORDER/CORNER are the frame thickness.
-    local BORDER = 4
+    -- on top. CORNER is the frame corner size.
     local CORNER = 8
     local function frameSprite(spriteID, setup, flipH, flipV)
         local s = ui.Sprite.new(window)
@@ -454,8 +442,7 @@ function UI.Init(statsModule, coloursModule)
 
     -- Top + bottom edge tiles. The HUD edge sprite is a thin line (~2px); force
     -- it to CORNER height stretches/repeats it and causes an artifact, so draw
-    -- it at its thin natural height flush against the top/bottom.
-    local EDGE_T = 2
+    -- it at its thin natural height (EDGE_T) flush against the top/bottom.
     frameSprite(TOP, function(s) s:SetPos(CORNER, 0); s:SetSize(-CORNER * 2, EDGE_T, 1.0, 0); try(function() s.isTiling = true end) end)
     frameSprite(BOT, function(s) s:SetPos(CORNER, -EDGE_T, 0, 1.0); s:SetSize(-CORNER * 2, EDGE_T, 1.0, 0); try(function() s.isTiling = true end) end)
     -- Left + right side tiles (also thin).

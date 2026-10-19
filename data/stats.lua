@@ -23,7 +23,6 @@ Stats.SORT_COUNT           = 4  -- count desc
 
 -- PersistentDB key base names; prefixed per-account via keyFor().
 local KEY_ALLTIME        = "allTime"
-local KEY_SESSION        = "session"
 local KEY_MANUAL_SESSION = "manualSession"
 local KEY_ORDER          = "order"       -- component -> received sequence
 local KEY_SORT_MODE      = "sortMode"    -- int, one of SORT_*
