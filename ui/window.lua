@@ -139,20 +139,23 @@ end
 -- position - keeping the window pinned to the cursor even when it outruns the
 -- handle. The grab ends when the heartbeat goes stale (button released).
 local grabKind       = nil     -- "move" | "resize" | nil
-local grabBaseX, grabBaseY     = 0, 0   -- window pos/size at grab start
+local grabEdges      = ""      -- for resize: which edges (l/r/t/b) are dragged
+local grabBaseX, grabBaseY     = 0, 0   -- window position at grab start
+local grabBaseW, grabBaseH     = 0, 0   -- window size at grab start
 local grabStartMX, grabStartMY = 0, 0   -- mouse pos at grab start
 local grabLastTick   = 0
 local grabCurTick    = 0
 
-function UI._beginGrab(kind)
+-- Begin (or refresh) a grab. kind = "move" | "resize". For resize, `edges` is
+-- a string containing any of l/r/t/b naming which edges follow the cursor
+-- (e.g. "rb" = bottom-right corner, "l" = left edge).
+function UI._beginGrab(kind, edges)
     grabLastTick = grabCurTick
-    if grabKind == kind then return end
+    if grabKind == kind and grabEdges == (edges or "") then return end
     grabKind = kind
-    if kind == "move" then
-        grabBaseX, grabBaseY = winX, winY
-    else -- resize
-        grabBaseX, grabBaseY = winW, winH
-    end
+    grabEdges = edges or ""
+    grabBaseX, grabBaseY = winX, winY
+    grabBaseW, grabBaseH = winW, winH
     grabStartMX, grabStartMY = Mouse.GetX(), Mouse.GetY()
 end
 
@@ -175,14 +178,45 @@ local function grabTick(e)
         winX = grabBaseX + dx
         winY = grabBaseY + dy
         try(function() window:SetPos(winX, winY) end)
-    else -- resize
-        local nw = grabBaseX + dx
-        local nh = grabBaseY + dy
-        if nw < S.MIN_W then nw = S.MIN_W elseif nw > S.MAX_W then nw = S.MAX_W end
-        if nh < S.MIN_H then nh = S.MIN_H elseif nh > S.MAX_H then nh = S.MAX_H end
-        winW, winH = nw, nh
-        applyGeometry()
+        return
     end
+
+    -- Resize: start from the base geometry, then adjust per dragged edge.
+    local nx, ny = grabBaseX, grabBaseY
+    local nw, nh = grabBaseW, grabBaseH
+
+    if string.find(grabEdges, "r", 1, true) then
+        nw = grabBaseW + dx
+    elseif string.find(grabEdges, "l", 1, true) then
+        nw = grabBaseW - dx
+        nx = grabBaseX + dx
+    end
+    if string.find(grabEdges, "b", 1, true) then
+        nh = grabBaseH + dy
+    elseif string.find(grabEdges, "t", 1, true) then
+        nh = grabBaseH - dy
+        ny = grabBaseY + dy
+    end
+
+    -- Clamp to min/max; when dragging a left/top edge, adjusting the clamp
+    -- must also correct the origin so the opposite edge stays put.
+    if nw < S.MIN_W then
+        if string.find(grabEdges, "l", 1, true) then nx = nx - (S.MIN_W - nw) end
+        nw = S.MIN_W
+    elseif nw > S.MAX_W then
+        if string.find(grabEdges, "l", 1, true) then nx = nx + (nw - S.MAX_W) end
+        nw = S.MAX_W
+    end
+    if nh < S.MIN_H then
+        if string.find(grabEdges, "t", 1, true) then ny = ny - (S.MIN_H - nh) end
+        nh = S.MIN_H
+    elseif nh > S.MAX_H then
+        if string.find(grabEdges, "t", 1, true) then ny = ny + (nh - S.MAX_H) end
+        nh = S.MAX_H
+    end
+
+    winX, winY, winW, winH = nx, ny, nw, nh
+    applyGeometry()
 end
 
 -- Body band height for rows. The root Panel sizes the table Layer, so read its
@@ -434,19 +468,43 @@ function UI.Init(statsModule)
         refreshList()
     end)
 
-    -- Resize grip, bottom-right. Same heartbeat + global-tick model as drag.
-    resizeHandle = ui.Rectangle.new(window)
-    resizeHandle:SetSize(S.HANDLE_SZ, S.HANDLE_SZ, 0, 0)
-    resizeHandle.fill = true
-    resizeHandle.colour = S.COL_HANDLE
-    resizeHandle:SetX(-S.HANDLE_SZ, 1.0)
-    resizeHandle:SetY(-S.HANDLE_SZ, 1.0)
-    try(function() resizeHandle.clickthrough = false end)
-    try(function() resizeHandle.enabled = true end)
-    resizeHandle:Subscribe(ui.Hook.ONHOLD, function()
-        if not Mouse.IsAvailable() then return end
-        UI._beginGrab("resize")
+    -- Resize handles: thin strips on each edge + small grips at each corner,
+    -- so the window resizes from any direction. Each uses the same heartbeat +
+    -- global-tick grab model as drag; the edge string tells grabTick which
+    -- edges follow the cursor. A visible grip marks the bottom-right corner.
+    local EDGE = 6   -- edge strip thickness
+    local function makeHandle(edges, setup)
+        local h = ui.Rectangle.new(window)
+        h.fill = true
+        h.colour = S.COL_TRANSPARENT
+        setup(h)
+        try(function() h.clickthrough = false end)
+        try(function() h.enabled = true end)
+        h:Subscribe(ui.Hook.ONHOLD, function()
+            if not Mouse.IsAvailable() then return end
+            UI._beginGrab("resize", edges)
+        end)
+        return h
+    end
+
+    -- Edges (full-length strips inset from the corners).
+    makeHandle("l", function(h) h:SetSize(EDGE, -2 * EDGE, 0, 1.0); h:SetPos(0, EDGE) end)
+    makeHandle("r", function(h) h:SetSize(EDGE, -2 * EDGE, 0, 1.0); h:SetX(-EDGE, 1.0); h:SetY(EDGE) end)
+    makeHandle("t", function(h) h:SetSize(-2 * EDGE, EDGE, 1.0, 0); h:SetPos(EDGE, 0) end)
+    makeHandle("b", function(h) h:SetSize(-2 * EDGE, EDGE, 1.0, 0); h:SetX(EDGE); h:SetY(-EDGE, 1.0) end)
+
+    -- Corners (square grips).
+    makeHandle("lt", function(h) h:SetSize(EDGE, EDGE, 0, 0); h:SetPos(0, 0) end)
+    makeHandle("rt", function(h) h:SetSize(EDGE, EDGE, 0, 0); h:SetX(-EDGE, 1.0); h:SetY(0) end)
+    makeHandle("lb", function(h) h:SetSize(EDGE, EDGE, 0, 0); h:SetX(0); h:SetY(-EDGE, 1.0) end)
+
+    -- Bottom-right corner: a visible grip (the others are invisible strips).
+    resizeHandle = makeHandle("rb", function(h)
+        h:SetSize(S.HANDLE_SZ, S.HANDLE_SZ, 0, 0)
+        h:SetX(-S.HANDLE_SZ, 1.0)
+        h:SetY(-S.HANDLE_SZ, 1.0)
     end)
+    resizeHandle.colour = S.COL_HANDLE  -- make the corner grip visible
 
     selectTab(activeTab)
 
