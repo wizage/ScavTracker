@@ -2,8 +2,7 @@
 
 # ScavTracker
 
-Tracks the Invention components you gain from the **Scavenging** perk and
-Archaeology **blessings**, read straight from your chat. Counts are split into
+Tracks the Invention components you gain from the **Scavenging** perk and **blessings**, read straight from your chat. Counts are split into
 three tabs:
 
 - **Session** - resets every time the client launches.
