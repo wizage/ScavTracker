@@ -156,4 +156,12 @@ function Settings.Init(statsModule, refreshCb, uiModule, coloursModule)
     end)
 end
 
+-- Populate an arbitrary parent component with the settings controls. Used by
+-- the self-contained settings window (reachable from the ribbon panel, since
+-- the native settings layer can't be opened programmatically).
+function Settings.BuildInto(parent)
+    if parent == nil then return end
+    try(build, parent)
+end
+
 return Settings

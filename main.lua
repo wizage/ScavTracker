@@ -31,6 +31,7 @@ Colours:Load()
 -- Build the window (empty until data loads) and wire the settings layer.
 UI.Init(Stats, Colours)
 Settings.Init(Stats, function() UI.Refresh() end, UI, Colours)
+UI.SetSettingsModule(Settings)  -- lets the ribbon gear open a settings window
 
 -- Record a proc into the data layer and refresh the window.
 local function recordProc(name, count)
@@ -73,10 +74,21 @@ end
 -- Start watching chat for component-gain procs.
 Reader.Start(recordProc)
 
+-- Ribbon content layer: render the full ScavTracker table into the Plugins
+-- window's ribbon panel (docked + always live). Fires when the user opens the
+-- ribbon icon; the client clears the layer first, so UI.MountContent rebuilds.
+-- The floating window stays independent (its red X hides it); the ribbon panel
+-- has a pop-out icon to show it again.
+Event.ContentLayerReady.Subscribe("scavTrackerContent", function(e)
+    if e == nil or e.component == nil then return end
+    pcall(function() UI.MountContent(e.component) end)
+end)
+
 -- Clean up on unload/reload so event subscriptions don't leak across reloads.
 function PluginShutdown()
     pcall(function() Reader.Stop() end)
     pcall(function() Event.Logic.Unsubscribe("scavTrackerTrackingPoll") end)
     pcall(function() Event.Logic.Unsubscribe("scavTrackerGrab") end)
     pcall(function() Event.SettingsLayerReady.Unsubscribe("scavTrackerSettings") end)
+    pcall(function() Event.ContentLayerReady.Unsubscribe("scavTrackerContent") end)
 end
