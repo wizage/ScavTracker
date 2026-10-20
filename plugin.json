@@ -1,7 +1,8 @@
 {
     "name": "ScavTracker",
-    "version": "1.0.2",
+    "version": "1.1.0",
     "contactEmailAddress": "wizagesmax@gmail.com",
     "requiredPermissions": [ "chatAccess", "trackingAccess" ],
-    "hasSettingsIcon": true
+    "hasSettingsIcon": true,
+    "hasRibbonIcon": true
 }

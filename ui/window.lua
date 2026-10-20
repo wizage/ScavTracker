@@ -1,12 +1,21 @@
 -- ScavTracker / ui / window
 --
--- The main plugin window: a draggable, resizable panel with three tabs
--- (Session / Trip / All Time) showing a scrollable table of component counts.
--- Built from decorative components (the interactive ui.List renders as a
--- dropdown, so rows are hand-drawn Rectangles + Text).
+-- The plugin's table UI: three tabs (Session / Trip / All Time) over a
+-- scrollable table of component counts. The same table is rendered into one or
+-- more "surfaces": the draggable/resizable floating window and the ribbon
+-- content panel. Each surface has its own active tab + scroll, so the two can
+-- show different tabs independently; they share only the underlying data.
+-- Rows are hand-drawn Rectangles + Text (the interactive ui.List renders as a
+-- dropdown, so it can't be used for the table).
 --
 -- Style constants (sizes, colours, font) live in ui/styles, referenced as S.*.
--- Public API: UI.Init(stats, colours), UI.Refresh(), UI.Show/Hide/Toggle/IsVisible().
+-- Public API:
+--   UI.Init(stats, colours)        - build the floating window
+--   UI.MountContent(component)      - render the table into the ribbon layer
+--   UI.SetSettingsModule(mod)       - inject ui/settings (for the gear button)
+--   UI.Refresh()                    - redraw all surfaces
+--   UI.Show/Hide/Toggle/IsVisible() - floating window visibility
+--   UI.ShowSettings/HideSettings()  - the self-contained settings window
 -- Tab keys match Stats:GetCounter: "session" | "trip" | "allTime".
 
 local UI = {}
@@ -21,17 +30,42 @@ local TABS = {
 
 local Stats
 local Colours         -- data/colours module (rarity text colouring)
+local SettingsMod     -- ui/settings module, injected to build the settings window
 local window
+local settingsWin     -- self-contained settings window (built lazily)
 local root            -- root vertical Panel (resized with the window)
 local resizeHandle    -- bottom-right resize grip
-local body            -- table Layer (sized by the root panel) containing rows
-local scrollCatcher   -- transparent wheel-capture surface over the table
 local buttonBar       -- footer panel holding the reset button
-local tabButtons = {}
 local resetButton
-local activeTab = "session"
-local scrollY = 0
 local uiVisible = true   -- window shown/hidden (persisted)
+
+-- Surfaces: each is an independent place the same table is drawn. The floating
+-- window body is one surface; the ribbon content layer is another. Each surface
+-- keeps its OWN active tab, scroll offset, tab buttons, and reset bar, so the
+-- pop-out window and the ribbon panel can show different tabs independently.
+-- They share only the underlying data. A surface =
+--   { body = Layer, scrollY = number, activeTab = key,
+--     tabButtons = { key -> Button }, buttonBar = Panel|nil }.
+local surfaces = {}
+local contentSurf     -- the ribbon content surface (so we can drop it on remount)
+local contentSpriteBtns = {}   -- ribbon sprite buttons, to clear press-state on remount
+-- Press-state registry for sprite buttons (keyed by button). Declared here so
+-- dropContentSurface can clear ribbon entries on remount. Populated by
+-- spriteButton; swept each logic tick (see sweepPressStates).
+local pressReg = {}
+-- Register a table surface (its own body Layer). Each surface tracks its own
+-- active tab, scroll, tab buttons, and reset bar. Returns the surface table.
+local function addSurface(bodyLayer)
+    local surf = {
+        body = bodyLayer,
+        scrollY = 0,
+        activeTab = "session",
+        tabButtons = {},
+        buttonBar = nil,
+    }
+    surfaces[#surfaces + 1] = surf
+    return surf
+end
 
 -- Live window geometry (interface units), shared by drag + resize + persist.
 local winX, winY = 40, 40
@@ -46,22 +80,24 @@ local function try(fn, ...)
     return ok
 end
 
--- Remove all existing row components from the table body.
-local function clearRows()
-    if body == nil then return end
-    if type(body.DeleteAll) == "function" then
-        try(function() body:DeleteAll() end)
+-- Remove all existing row components from a surface's table body.
+local function clearRows(surf)
+    local b = surf and surf.body
+    if b == nil then return end
+    if type(b.DeleteAll) == "function" then
+        try(function() b:DeleteAll() end)
     end
 end
 
 -- Forward declarations so earlier functions can reference these locals.
-local bodyHeight, bodyWidth, refreshList, applyGeometry, saveGeometry
+local bodyHeight, bodyWidth, refreshList, applyGeometry, saveGeometry, renderSurface
 
--- Build row i (1-based), parented to `body` with body-relative y.
+-- Build row i (1-based) into surf.body with body-relative y.
 -- Returns true if the row fit the visible band and was drawn.
-local function buildRow(i, name, count, rarity)
-    local y = (i - 1) * S.ROW_H - scrollY
-    local bh = bodyHeight()
+local function buildRow(surf, i, name, count, rarity)
+    local body = surf.body
+    local y = (i - 1) * S.ROW_H - surf.scrollY
+    local bh = bodyHeight(surf)
 
     -- Cull rows that don't fully fit the table Layer.
     if y < 0 or (y + S.ROW_H) > bh then
@@ -137,21 +173,24 @@ local grabStartMX, grabStartMY = 0, 0   -- mouse pos at grab start
 local grabBaseScroll = 0       -- scrollY at scroll-grab start
 local grabScrollScale = 1      -- maps thumb pixel travel -> scrollY units
 local grabScrollMax  = 0       -- max scrollY at scroll-grab start
+local grabScrollSurf = nil     -- the surface being scroll-grabbed
 local grabLastTick   = 0
 local grabCurTick    = 0
+local sweepPressStates   -- forward decl; defined with the sprite-button helpers
 
 -- Begin (or refresh) a grab. kind = "move" | "resize" | "scroll".
 -- resize: `edges` names which edges follow the cursor (l/r/t/b).
--- scroll: `scale` maps one pixel of thumb travel to scrollY units, and
---         `smax` is the max scrollY (clamp).
-function UI._beginGrab(kind, edges, scale, smax)
+-- scroll: `scale` maps one pixel of thumb travel to scrollY units, `smax` is
+--         the max scrollY (clamp), and `surf` is the surface being scrolled.
+function UI._beginGrab(kind, edges, scale, smax, surf)
     grabLastTick = grabCurTick
     if grabKind == kind and grabEdges == (edges or "") then return end
     grabKind = kind
     grabEdges = edges or ""
     grabBaseX, grabBaseY = winX, winY
     grabBaseW, grabBaseH = winW, winH
-    grabBaseScroll = scrollY
+    grabScrollSurf = surf
+    grabBaseScroll = surf and surf.scrollY or 0
     grabScrollScale = scale or 1
     grabScrollMax = smax or 0
     grabStartMX, grabStartMY = Mouse.GetX(), Mouse.GetY()
@@ -159,6 +198,7 @@ end
 
 local function grabTick(e)
     grabCurTick = (e and e.logicTick) or (grabCurTick + 1)
+    if sweepPressStates then sweepPressStates() end
     if grabKind == nil then return end
 
     -- Heartbeat stale => button released, end the grab.
@@ -181,10 +221,11 @@ local function grabTick(e)
 
     if grabKind == "scroll" then
         -- Thumb drag: mouse Y delta * scale = scrollY delta, clamped.
+        if grabScrollSurf == nil then return end
         local ns = grabBaseScroll + dy * grabScrollScale
         if ns < 0 then ns = 0 elseif ns > grabScrollMax then ns = grabScrollMax end
-        scrollY = ns
-        refreshList()
+        grabScrollSurf.scrollY = ns
+        renderSurface(grabScrollSurf)
         return
     end
 
@@ -228,60 +269,64 @@ end
 
 -- Body band height for rows. The root Panel sizes the table Layer, so read its
 -- resolved height; fall back to an estimate before layout settles.
-function bodyHeight()
+function bodyHeight(surf)
+    local b = surf and surf.body
     local h
-    if body ~= nil then pcall(function() h = body.height end) end
+    if b ~= nil then pcall(function() h = b.height end) end
     if type(h) == "number" and h > 0 then return h end
     return winH - S.TITLE_H - S.TAB_H - S.BUTTON_H - 24
 end
 
 -- Inner width of the table Layer (for scrollbar placement).
-function bodyWidth()
+function bodyWidth(surf)
+    local b = surf and surf.body
     local w
-    if body ~= nil then pcall(function() w = body.width end) end
+    if b ~= nil then pcall(function() w = b.width end) end
     if type(w) == "number" and w > 0 then return w end
     return winW - 16
 end
 
-local function visibleRowCount()
-    return math.floor(bodyHeight() / S.ROW_H)
+local function visibleRowCount(surf)
+    return math.floor(bodyHeight(surf) / S.ROW_H)
 end
 
-local function maxScroll(numRows)
-    local overflow = numRows - visibleRowCount()
+local function maxScroll(surf, numRows)
+    local overflow = numRows - visibleRowCount(surf)
     if overflow <= 0 then return 0 end
     return overflow * S.ROW_H
 end
 
 -- Transparent wheel-capture surface filling the table Layer. Recreated each
 -- refresh because clearRows()/DeleteAll removes it with the rows.
-local function buildScrollCatcher()
-    scrollCatcher = ui.Rectangle.new(body)
-    scrollCatcher:SetSize(0, 0, 1.0, 1.0)
-    scrollCatcher:SetPos(0, 0)
-    scrollCatcher.fill = true
-    scrollCatcher.colour = S.COL_TRANSPARENT
-    try(function() scrollCatcher.clickthrough = false end)
-    try(function() scrollCatcher.enabled = true end)
-    scrollCatcher:Subscribe(ui.Hook.ONSCROLLWHEEL, function(self, delta)
-        local rows = Stats:GetSorted(activeTab)
-        local maxY = maxScroll(#rows)
+local function buildScrollCatcher(surf)
+    local body = surf.body
+    local catcher = ui.Rectangle.new(body)
+    catcher:SetSize(0, 0, 1.0, 1.0)
+    catcher:SetPos(0, 0)
+    catcher.fill = true
+    catcher.colour = S.COL_TRANSPARENT
+    try(function() catcher.clickthrough = false end)
+    try(function() catcher.enabled = true end)
+    catcher:Subscribe(ui.Hook.ONSCROLLWHEEL, function(self, delta)
+        local rows = Stats:GetSorted(surf.activeTab)
+        local maxY = maxScroll(surf, #rows)
         if maxY <= 0 then return end
-        scrollY = scrollY - (delta * S.ROW_H)
-        if scrollY < 0 then scrollY = 0 end
-        if scrollY > maxY then scrollY = maxY end
-        refreshList()
+        surf.scrollY = surf.scrollY - (delta * S.ROW_H)
+        if surf.scrollY < 0 then surf.scrollY = 0 end
+        if surf.scrollY > maxY then surf.scrollY = maxY end
+        renderSurface(surf)
     end)
 end
 
 -- Draw the scrollbar track + thumb on the right edge of the table (only on
--- overflow). Parented to `body`; coordinates are Layer-relative.
-local function buildScrollbar(numRows)
-    local maxY = maxScroll(numRows)
+-- overflow). Parented to surf.body; coordinates are Layer-relative.
+local function buildScrollbar(surf, numRows)
+    local body = surf.body
+    local maxY = maxScroll(surf, numRows)
     if maxY <= 0 then return end
 
-    local bh = bodyHeight()
-    local trackX = bodyWidth() - S.SB_W
+    local bh = bodyHeight(surf)
+    local trackX = bodyWidth(surf) - S.SB_W
 
     local track = ui.Rectangle.new(body)
     track:SetSize(S.SB_W, bh, 0, 0)
@@ -292,7 +337,7 @@ local function buildScrollbar(numRows)
     local totalContent = numRows * S.ROW_H
     local thumbH = math.max(16, math.floor(bh * (bh / totalContent)))
     local travel = bh - thumbH
-    local frac = (maxY > 0) and (scrollY / maxY) or 0
+    local frac = (maxY > 0) and (surf.scrollY / maxY) or 0
     local thumbY = math.floor(travel * frac)
 
     local thumb = ui.Rectangle.new(body)
@@ -308,47 +353,293 @@ local function buildScrollbar(numRows)
     try(function() thumb.enabled = true end)
     thumb:Subscribe(ui.Hook.ONHOLD, function()
         if not Mouse.IsAvailable() then return end
-        UI._beginGrab("scroll", nil, scale, maxY)
+        UI._beginGrab("scroll", nil, scale, maxY, surf)
     end)
 end
 
--- Rebuild the table for the active tab.
-function refreshList()
-    if window == nil or body == nil then return end
+-- Render one surface's table for its own active tab.
+function renderSurface(surf)
+    if surf == nil or surf.body == nil then return end
+    if Stats == nil then return end
 
-    -- Footer is only shown on resettable tabs. Hiding the whole bar (not just
-    -- the button) lets the root Panel give that space back to the table. Done
-    -- before building rows so bodyHeight() reflects the change.
+    -- Reset bar is only shown on resettable tabs for THIS surface. Hiding it
+    -- AND collapsing its height to 0 makes the vertical Panel reclaim the slot
+    -- so the table grows all the way down. Done before building rows so
+    -- bodyHeight() reflects the new size.
     local resettable = false
     for _, tab in ipairs(TABS) do
-        if tab.key == activeTab then resettable = tab.resettable end
+        if tab.key == surf.activeTab then resettable = tab.resettable end
     end
-    if buttonBar ~= nil then
-        try(function() buttonBar.hidden = not resettable end)
+    if surf.buttonBar ~= nil then
+        try(function() surf.buttonBar.hidden = not resettable end)
+        try(function()
+            surf.buttonBar:SetSize(0, resettable and S.BUTTON_H or 0, 1.0, 0)
+        end)
     end
 
-    clearRows()
-    buildScrollCatcher()
+    -- Clamp this surface's scroll to its own content/size.
+    local rows = Stats:GetSorted(surf.activeTab) or {}
+    local maxY = maxScroll(surf, #rows)
+    if surf.scrollY > maxY then surf.scrollY = maxY end
+    if surf.scrollY < 0 then surf.scrollY = 0 end
 
-    local rows = Stats:GetSorted(activeTab)
+    clearRows(surf)
+    buildScrollCatcher(surf)
     for i, row in ipairs(rows) do
-        try(buildRow, i, row.name, row.count, row.rarity)
+        try(buildRow, surf, i, row.name, row.count, row.rarity)
     end
-
-    try(buildScrollbar, #rows)
+    try(buildScrollbar, surf, #rows)
 end
 
-local function selectTab(key)
-    activeTab = key
-    scrollY = 0
-    for k, btn in pairs(tabButtons) do
+-- Rebuild every mounted surface (each renders its own active tab).
+function refreshList()
+    for _, surf in ipairs(surfaces) do
+        renderSurface(surf)
+    end
+end
+
+-- Switch one surface to a tab (independent of other surfaces).
+local function selectTab(surf, key)
+    surf.activeTab = key
+    surf.scrollY = 0
+    for k, btn in pairs(surf.tabButtons) do
         try(function() btn.isToggled = (k == key) end)  -- highlight active tab
     end
-    refreshList()
+    renderSurface(surf)
 end
 
 function UI.Refresh()
     refreshList()
+end
+
+-- ---- Ribbon content layer -------------------------------------------------
+-- The content layer (ribbon panel in the Plugins window) hosts a second copy
+-- of the same table, always docked and live. It is rebuilt each time
+-- ContentLayerReady fires (the client clears the layer first), so this drops
+-- any previous content surface and registers the fresh one.
+
+-- Remove the previous content surface from the surfaces list (its components
+-- are already gone because the client cleared the layer).
+local function dropContentSurface()
+    if contentSurf == nil then return end
+    for i, s in ipairs(surfaces) do
+        if s == contentSurf then table.remove(surfaces, i) break end
+    end
+    contentSurf = nil
+    -- Drop the old ribbon sprite buttons' press-state entries (their components
+    -- are gone; leaving them would slowly accumulate dead entries).
+    for _, btn in ipairs(contentSpriteBtns) do
+        pressReg[btn] = nil
+    end
+    contentSpriteBtns = {}
+end
+
+-- Resolve a sprite's state variants. The game names some buttons with
+-- _NML/_OVR/_PRESSED suffixes and others as a single flat id, so try the
+-- suffixed names first and fall back to the base id. Returns nml, ovr, pressed
+-- (ovr/pressed default to nml when absent).
+local function spriteStates(base)
+    local S_ = id.Sprite
+    -- id.Sprite returns -1 (not nil) for names that don't exist, so treat any
+    -- negative/zero id as absent. Many icons are flat ids with no _NML/_OVR
+    -- variants, so this falls back to the base id.
+    local function get(key)
+        local v
+        pcall(function() v = S_[key] end)
+        if type(v) ~= "number" or v < 0 then return nil end
+        return v
+    end
+    local nml     = get(base .. "_NML") or get(base)
+    local ovr     = get(base .. "_OVR") or nml
+    local pressed = get(base .. "_PRESSED") or ovr
+    return nml, ovr, pressed
+end
+
+-- Press-state registry for sprite buttons. ONHOLD is a per-tick heartbeat (it
+-- keeps firing while held and may fire once more around release), so resetting
+-- the sprite in ONCLICK races and leaves it stuck on "pressed". Instead, each
+-- ONHOLD records the current logic tick; a logic-tick sweep restores any button
+-- whose heartbeat has gone stale (released) to hover (if the mouse is still
+-- over it) or normal. (pressReg is declared near the top so dropContentSurface
+-- can clear ribbon entries on remount.)
+
+-- Restore any sprite buttons whose press heartbeat went stale. Called from the
+-- global logic tick (grabCurTick is advanced there before this runs).
+function sweepPressStates()
+    for btn, st in pairs(pressReg) do
+        if st.held and (grabCurTick - st.tick) > 1 then
+            st.held = false
+            try(function() btn.spriteID = st.over and st.ovr or st.nml end)
+        end
+    end
+end
+
+-- Resolve a single sprite id by name, treating -1/invalid as nil.
+local function spriteId(name)
+    if name == nil then return nil end
+    local v
+    pcall(function() v = id.Sprite[name] end)
+    if type(v) ~= "number" or v < 0 then return nil end
+    return v
+end
+
+-- Create a native sprite button on `parent` wired to hover/press/leave states
+-- (mirrors the floating window's close button) that calls onClick when pressed.
+-- `spec` is either a base-name string (tries _NML/_OVR/_PRESSED then the flat
+-- id) or an explicit table { nml = "..", ovr = "..", pressed = ".." } for
+-- sprites whose variants don't follow the _NML/_OVR/_PRESSED naming.
+local function spriteButton(parent, spec, onClick)
+    local nml, ovr, pressed
+    if type(spec) == "table" then
+        nml     = spriteId(spec.nml)
+        ovr     = spriteId(spec.ovr) or nml
+        pressed = spriteId(spec.pressed) or ovr
+    else
+        nml, ovr, pressed = spriteStates(spec)
+    end
+    if nml == nil then return nil end
+    local btn = ui.Sprite.new(parent)
+    btn.spriteID = nml
+    try(function() btn.clickthrough = false end)
+    try(function() btn.enabled = true end)
+
+    -- Register press-state so the logic-tick sweep can restore it on release.
+    local st = { nml = nml, ovr = ovr, pressed = pressed, over = false, held = false, tick = 0 }
+    pressReg[btn] = st
+
+    btn:Subscribe(ui.Hook.ONMOUSEOVER, function()
+        st.over = true
+        if not st.held then btn.spriteID = ovr end
+    end)
+    btn:Subscribe(ui.Hook.ONMOUSELEAVE, function()
+        st.over = false
+        if not st.held then btn.spriteID = nml end
+    end)
+    btn:Subscribe(ui.Hook.ONHOLD, function()
+        -- Heartbeat while the button is held: show pressed and stamp the tick.
+        st.held = true
+        st.tick = grabCurTick
+        btn.spriteID = pressed
+    end)
+    btn:Subscribe(ui.Hook.ONCLICK, function()
+        if onClick then onClick() end
+    end)
+    return btn
+end
+
+-- Build the full table UI into a ribbon content component (a ui.Layer). Mirrors
+-- the floating window's layout (tab bar / table / reset) minus the frame +
+-- drag/resize chrome, plus a pop-out icon where the window's X sits.
+function UI.MountContent(component)
+    if component == nil then return end
+    dropContentSurface()
+
+    -- Header strip: title on the left, icon buttons on the right.
+    local HEADER_H = 22
+    local title = ui.Text.new(component)
+    title:SetSize(-72, HEADER_H, 1.0, 0)
+    title:SetPos(6, 2)
+    title.content = "Scav Tracker"
+    title.font = S.FONT
+    title:AlignTo(ui.AlignMode.TOPLEFT, ui.AlignMode.CENTRE)
+
+    -- Pop-out button (top-right, where the floating window's red X is): native
+    -- minimise sprite with explicit state variants (5 normal, 3 hover, 4
+    -- pressed). Shows the floating window.
+    local pop = spriteButton(component, {
+        nml     = "RS3_BTN_MINIMISE_5",
+        ovr     = "RS3_BTN_MINIMISE_3",
+        pressed = "RS3_BTN_MINIMISE_4",
+    }, function() UI.Show() end)
+    if pop ~= nil then
+        pop:SetSize(18, 18, 0, 0)
+        pop:SetX(-24, 1.0)
+        pop:SetY(2)
+        contentSpriteBtns[#contentSpriteBtns + 1] = pop
+    else
+        -- Fallback: labelled button if the sprite id isn't present.
+        local popBtn = ui.Button.new(component)
+        popBtn:SetSize(40, HEADER_H - 2, 0, 0)
+        popBtn:SetX(-42, 1.0)
+        popBtn:SetY(1)
+        popBtn.label = "Pop"
+        popBtn.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
+        popBtn:Subscribe(ui.Hook.ONBUTTONPRESSED, function() UI.Show() end)
+    end
+
+    -- Settings button (left of the pop-out): native plugin-hub settings icon.
+    -- Opens the self-contained settings window.
+    local gear = spriteButton(component, "RS3_ICON_PLUGIN_HUB_SETTINGS_ACTIVE",
+        function() UI.ShowSettings() end)
+    if gear ~= nil then
+        gear:SetSize(18, 18, 0, 0)
+        gear:SetX(-46, 1.0)
+        gear:SetY(2)
+        contentSpriteBtns[#contentSpriteBtns + 1] = gear
+    else
+        local gearBtn = ui.Button.new(component)
+        gearBtn:SetSize(48, HEADER_H - 2, 0, 0)
+        gearBtn:SetX(-92, 1.0)
+        gearBtn:SetY(1)
+        gearBtn.label = "Cfg"
+        gearBtn.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
+        gearBtn:Subscribe(ui.Hook.ONBUTTONPRESSED, function() UI.ShowSettings() end)
+    end
+
+    -- Vertical layout under the header: [tab bar] / [table] / [reset].
+    local panel = ui.Panel.new(component)
+    panel.isVertical = true
+    panel.spacing = 4
+    panel:SetSize(-8, -(HEADER_H + 8), 1.0, 1.0)
+    panel:SetPos(4, HEADER_H + 2)
+
+    -- Create this surface up front so its tab buttons / reset bar bind to it.
+    -- Its body Layer is assigned after the tab bar (vertical layout order).
+    local surf = addSurface(nil)
+    contentSurf = surf
+
+    -- Tab bar (controls only this surface's active tab).
+    local tabBar = ui.Panel.new(panel)
+    tabBar.isVertical = false
+    tabBar.spacing = 4
+    tabBar:SetSize(0, S.TAB_H, 1.0, 0)
+    for _, tab in ipairs(TABS) do
+        local btn = ui.Button.new(tabBar)
+        btn:SetSize(0, 0, 1.0, 1.0)
+        btn.label = tab.label
+        btn.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
+        try(function() btn.canToggle = true end)
+        try(function() btn.isToggled = (tab.key == surf.activeTab) end)
+        btn:Subscribe(ui.Hook.ONBUTTONPRESSED, function() selectTab(surf, tab.key) end)
+        surf.tabButtons[tab.key] = btn
+    end
+
+    -- Table body for this surface.
+    local cbody = ui.Layer.new(panel)
+    cbody:SetSize(0, 0, 1.0, 1.0)
+    surf.body = cbody
+
+    -- Reset bar: hidden on non-resettable tabs by renderSurface. Hiding the
+    -- whole bar (not just the button) lets the Panel give space back to the
+    -- table. Acts on this surface's active tab.
+    local cBar = ui.Panel.new(panel)
+    cBar.isVertical = false
+    cBar:SetSize(0, S.BUTTON_H, 1.0, 0)
+    surf.buttonBar = cBar
+    local cReset = ui.Button.new(cBar)
+    cReset:SetSize(0, 0, 1.0, 1.0)
+    cReset.label = "Reset"
+    cReset.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
+    cReset:Subscribe(ui.Hook.ONBUTTONPRESSED, function()
+        if surf.activeTab == "session" then
+            Stats:ResetSession()
+        elseif surf.activeTab == "trip" then
+            Stats:ResetManualSession()
+        end
+        refreshList()
+    end)
+
+    renderSurface(surf)
 end
 
 -- ---- Show / hide (tracking continues regardless; visibility persisted) ----
@@ -374,6 +665,100 @@ end
 
 function UI.Toggle()
     if uiVisible then UI.Hide() else UI.Show() end
+end
+
+-- Inject the settings module (avoids a require cycle: settings.lua requires UI).
+function UI.SetSettingsModule(mod)
+    SettingsMod = mod
+end
+
+-- ---- Self-contained settings window ---------------------------------------
+-- The native settings layer can't be opened programmatically, so the ribbon
+-- panel's settings icon shows this raw window instead. Built lazily the first
+-- time, then just shown/hidden. Reuses ui/settings' BuildInto for the controls.
+local SETTINGS_W, SETTINGS_H = 300, 300
+
+local function buildSettingsWindow()
+    local gameWindow = ui.Interfaces:GetComponent(id.Component.TOPLEVEL_V2__PLUGIN_BUILD_LAYER_TOP)
+    if gameWindow == nil then return end
+
+    settingsWin = ui.Layer.new(gameWindow)
+    try(function() settingsWin.clickthrough = false end)
+    try(function() settingsWin.enabled = true end)
+    settingsWin:SetSize(SETTINGS_W, SETTINGS_H)
+    -- Centre on screen: anchor to the parent's midpoint (0.5) and offset back by
+    -- half the window size so the window's centre lands on the screen centre.
+    settingsWin:SetX(-SETTINGS_W / 2, 0.5)
+    settingsWin:SetY(-SETTINGS_H / 2, 0.5)
+
+    -- HUD frame (same 6-piece set as the main window, simplified).
+    local EDGE_T, CORNER = 2, 8
+    local bg = ui.Sprite.new(settingsWin)
+    bg.spriteID = id.Sprite.RS3_HUD_WINDOW_CONTENT_TILE
+    bg:SetPos(EDGE_T, EDGE_T)
+    bg:SetSize(-EDGE_T * 2, -EDGE_T * 2, 1.0, 1.0)
+    try(function() bg.isTiling = true end)
+    try(function() bg.clickthrough = false end)
+    try(function() bg.enabled = true end)
+
+    local function frameSprite(spriteID, setup, flipH, flipV)
+        local s = ui.Sprite.new(settingsWin)
+        s.spriteID = spriteID
+        setup(s)
+        try(function() s.clickthrough = true end)
+        if flipH then try(function() s.isFlippedHorizontally = true end) end
+        if flipV then try(function() s.isFlippedVertical = true end) end
+    end
+    local TOP  = id.Sprite.RS3_HUD_WINDOW_TOP_TILE
+    local BOT  = id.Sprite.RS3_HUD_WINDOW_BOTTOM_TILE
+    local SIDE = id.Sprite.RS3_HUD_WINDOW_SIDE_TILE
+    local CT   = id.Sprite.RS3_HUD_WINDOW_CORNER_TOP
+    local CB   = id.Sprite.RS3_HUD_WINDOW_CORNER_BOTTOM
+    frameSprite(TOP, function(s) s:SetPos(CORNER, 0); s:SetSize(-CORNER * 2, EDGE_T, 1.0, 0); try(function() s.isTiling = true end) end)
+    frameSprite(BOT, function(s) s:SetPos(CORNER, -EDGE_T, 0, 1.0); s:SetSize(-CORNER * 2, EDGE_T, 1.0, 0); try(function() s.isTiling = true end) end)
+    frameSprite(SIDE, function(s) s:SetPos(0, CORNER); s:SetSize(EDGE_T, -CORNER * 2, 0, 1.0); try(function() s.isTiling = true end) end)
+    frameSprite(SIDE, function(s) s:SetPos(-EDGE_T, CORNER, 1.0); s:SetSize(EDGE_T, -CORNER * 2, 0, 1.0); try(function() s.isTiling = true end) end, true)
+    frameSprite(CT, function(s) s:SetPos(0, 0); s:SetSize(CORNER, CORNER, 0, 0) end)
+    frameSprite(CT, function(s) s:SetPos(-CORNER, 0, 1.0); s:SetSize(CORNER, CORNER, 0, 0) end, true)
+    frameSprite(CB, function(s) s:SetPos(0, -CORNER, 0, 1.0); s:SetSize(CORNER, CORNER, 0, 0) end)
+    frameSprite(CB, function(s) s:SetPos(-CORNER, -CORNER, 1.0, 1.0); s:SetSize(CORNER, CORNER, 0, 0) end, true)
+
+    -- Title.
+    local titleText = ui.Text.new(settingsWin)
+    titleText:SetSize(0, S.TITLE_H, 1.0, 0)
+    titleText:SetPos(0, 0)
+    titleText.content = "Scav Tracker - Settings"
+    titleText.font = S.FONT
+    titleText:AlignTo(ui.AlignMode.CENTRE)
+
+    -- Close button (native red X), top-right.
+    local closeBtn = ui.Sprite.new(settingsWin)
+    closeBtn:SetSize(20, 20, 0, 0)
+    closeBtn:SetX(-28, 1.0)
+    closeBtn:SetY(9)
+    closeBtn.spriteID = id.Sprite.RS3_BTN_MODAL_WINDOW_1_CLOSE_NML
+    try(function() closeBtn.clickthrough = false end)
+    try(function() closeBtn.enabled = true end)
+    closeBtn:Subscribe(ui.Hook.ONMOUSEOVER, function() closeBtn.spriteID = id.Sprite.RS3_BTN_MODAL_WINDOW_1_CLOSE_OVR end)
+    closeBtn:Subscribe(ui.Hook.ONMOUSELEAVE, function() closeBtn.spriteID = id.Sprite.RS3_BTN_MODAL_WINDOW_1_CLOSE_NML end)
+    closeBtn:Subscribe(ui.Hook.ONCLICK, function() UI.HideSettings() end)
+
+    -- Content region below the title: reuse the settings controls.
+    local content = ui.Layer.new(settingsWin)
+    content:SetSize(-24, -(S.TITLE_H + 16), 1.0, 1.0)
+    content:SetPos(12, S.TITLE_H)
+    if SettingsMod and SettingsMod.BuildInto then
+        try(function() SettingsMod.BuildInto(content) end)
+    end
+end
+
+function UI.ShowSettings()
+    if settingsWin == nil then buildSettingsWindow() end
+    if settingsWin ~= nil then try(function() settingsWin.hidden = false end) end
+end
+
+function UI.HideSettings()
+    if settingsWin ~= nil then try(function() settingsWin.hidden = true end) end
 end
 
 function UI.Init(statsModule, coloursModule)
@@ -504,7 +889,12 @@ function UI.Init(statsModule, coloursModule)
     root:SetSize(-24, -(S.TITLE_H + 16), 1.0, 1.0)
     root:SetPos(12, S.TITLE_H)
 
-    -- Region 1: tab bar - equal-width toggle buttons.
+    -- Floating window surface: created before the tab bar so its tab buttons
+    -- and reset bar can bind to it. Its body Layer is assigned below (the
+    -- vertical Panel lays children out in creation order).
+    local fsurf = addSurface(nil)
+
+    -- Region 1: tab bar - equal-width toggle buttons (control this surface).
     local tabBar = ui.Panel.new(root)
     tabBar.isVertical = false
     tabBar.spacing = 4
@@ -515,27 +905,29 @@ function UI.Init(statsModule, coloursModule)
         btn.label = tab.label
         btn.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
         try(function() btn.canToggle = true end)
-        btn:Subscribe(ui.Hook.ONBUTTONPRESSED, function() selectTab(tab.key) end)
-        tabButtons[tab.key] = btn
+        btn:Subscribe(ui.Hook.ONBUTTONPRESSED, function() selectTab(fsurf, tab.key) end)
+        fsurf.tabButtons[tab.key] = btn
     end
 
     -- Region 2: table - a Layer filling the middle; rows positioned manually
-    -- inside it (so scrolling works). Rows/scrollbar built by refreshList().
-    body = ui.Layer.new(root)
+    -- inside it (so scrolling works). Rows/scrollbar built by renderSurface().
+    local body = ui.Layer.new(root)
     body:SetSize(0, 0, 1.0, 1.0)
+    fsurf.body = body
 
-    -- Region 3: button bar - the reset button for the active resettable tab.
+    -- Region 3: button bar - the reset button for this surface's active tab.
     buttonBar = ui.Panel.new(root)
     buttonBar.isVertical = false
     buttonBar:SetSize(0, S.BUTTON_H, 1.0, 0)
+    fsurf.buttonBar = buttonBar
     resetButton = ui.Button.new(buttonBar)
     resetButton:SetSize(0, 0, 1.0, 1.0)
     resetButton.label = "Reset"
     resetButton.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
     resetButton:Subscribe(ui.Hook.ONBUTTONPRESSED, function()
-        if activeTab == "session" then
+        if fsurf.activeTab == "session" then
             Stats:ResetSession()
-        elseif activeTab == "trip" then
+        elseif fsurf.activeTab == "trip" then
             Stats:ResetManualSession()
         end
         refreshList()
@@ -590,7 +982,7 @@ function UI.Init(statsModule, coloursModule)
         h:SetY(-S.HANDLE_SZ, 1.0)
     end)
 
-    selectTab(activeTab)
+    selectTab(fsurf, fsurf.activeTab)
 
     -- Restore persisted visibility (defaults to shown).
     local vis
